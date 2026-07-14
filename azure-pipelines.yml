@@ -1,0 +1,190 @@
+# Azure DevOps CI pipeline
+# Builds, checks and publishes the backend (Node/Express) and frontend (React)
+# packages from Application-Code/ as npm packages to an Azure Artifacts feed.
+#
+# ONE-TIME SETUP (do these in the Azure DevOps portal before the first run):
+# 1. Connect GitHub:
+#    Pipelines -> New pipeline -> "GitHub" -> authorize with your GitHub account/App
+#    -> select this repository. Azure DevOps stores the GitHub connection itself;
+#    no secret/token needs to go in this YAML file for the checkout/trigger to work.
+#    (If this pipeline instead lives in Azure Repos and needs to pull code from a
+#    *separate* GitHub repo, create a GitHub service connection under
+#    Project Settings -> Service connections, then reference it via a
+#    `resources.repositories` block instead of `checkout: self`.)
+# 2. Create an Azure Artifacts feed (Artifacts -> Create Feed), then set the
+#    `azureArtifactsFeed` variable below to its name (or Project/Feed@version id
+#    if the feed is project-scoped).
+# 3. Grant the pipeline's build service "Contributor" permission on that feed
+#    (Feed settings -> Permissions), otherwise the publish step gets a 401/403.
+# 4. Update backendPackageName / frontendPackageName below to a name you own
+#    (scope it, e.g. "@yourorg/...", to avoid clashing with public npm names).
+# 5. Replace the backend's placeholder `test` script in
+#    Application-Code/backend/package.json (it currently just exits 1) with real
+#    tests, then remove the `continueOnError: true` flagged below.
+
+trigger:
+  branches:
+    include:
+      - master
+
+pr:
+  branches:
+    include:
+      - master
+
+variables:
+  nodeVersion: '14.x' # matches the node:14 base image used in both Dockerfiles
+  azureArtifactsFeed: 'three-tier-app-feed' # <-- update to your Azure Artifacts feed name
+  backendPackageName: '@your-org/three-tier-backend' # <-- update scope/name
+  frontendPackageName: '@your-org/three-tier-frontend' # <-- update scope/name
+  npm_config_cache: $(Pipeline.Workspace)/.npm
+
+stages:
+  # ---------------------------------------------------------------------
+  - stage: Backend_CI
+    displayName: 'Backend: checks, build & publish'
+    jobs:
+      - job: Build_And_Test
+        displayName: 'Install, audit, test'
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+            displayName: 'Use Node $(nodeVersion)'
+
+          - task: Cache@2
+            inputs:
+              key: 'npm | "$(Agent.OS)" | Application-Code/backend/package.json'
+              restoreKeys: 'npm | "$(Agent.OS)"'
+              path: $(npm_config_cache)
+            displayName: 'Cache npm packages'
+
+          - script: npm install
+            workingDirectory: Application-Code/backend
+            displayName: 'npm install'
+
+          - script: npm audit --audit-level=high
+            workingDirectory: Application-Code/backend
+            displayName: 'Security audit (npm audit)'
+
+          - script: npm test
+            workingDirectory: Application-Code/backend
+            displayName: 'Run unit tests'
+            continueOnError: true # backend package.json has a placeholder test script today; fix it, then remove this line
+
+          - script: npm run build --if-present
+            workingDirectory: Application-Code/backend
+            displayName: 'Build (no-op if no build script defined)'
+
+      - job: Publish
+        displayName: 'Publish npm package to Azure Artifacts'
+        dependsOn: Build_And_Test
+        condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'), ne(variables['Build.Reason'], 'PullRequest'))
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+            displayName: 'Use Node $(nodeVersion)'
+
+          - script: |
+              set -e
+              npm install
+              npm pkg set name="$(backendPackageName)"
+              npm --no-git-tag-version version "1.0.$(Build.BuildId)"
+            workingDirectory: Application-Code/backend
+            displayName: 'Set package name & unique version'
+
+          - task: Npm@1
+            displayName: 'npm publish -> Azure Artifacts'
+            inputs:
+              command: publish
+              workingDir: Application-Code/backend
+              publishRegistry: useFeed
+              publishFeed: $(azureArtifactsFeed)
+
+  # ---------------------------------------------------------------------
+  - stage: Frontend_CI
+    displayName: 'Frontend: checks, build & publish'
+    jobs:
+      - job: Build_And_Test
+        displayName: 'Install, lint, test, build'
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+            displayName: 'Use Node $(nodeVersion)'
+
+          - task: Cache@2
+            inputs:
+              key: 'npm | "$(Agent.OS)" | Application-Code/frontend/package.json'
+              restoreKeys: 'npm | "$(Agent.OS)"'
+              path: $(npm_config_cache)
+            displayName: 'Cache npm packages'
+
+          - script: npm install
+            workingDirectory: Application-Code/frontend
+            displayName: 'npm install'
+
+          - script: npm audit --audit-level=high
+            workingDirectory: Application-Code/frontend
+            displayName: 'Security audit (npm audit)'
+
+          - script: npx eslint src --max-warnings=0
+            workingDirectory: Application-Code/frontend
+            displayName: 'Lint (eslint via CRA config)'
+            continueOnError: true # tighten/remove once the codebase is warning-free
+
+          - script: CI=true npm test -- --watchAll=false
+            workingDirectory: Application-Code/frontend
+            displayName: 'Run unit tests'
+
+          - script: npm run build
+            workingDirectory: Application-Code/frontend
+            displayName: 'Production build (react-scripts build)'
+
+          - publish: Application-Code/frontend/build
+            artifact: frontend-build
+            displayName: 'Publish build output as pipeline artifact'
+
+      - job: Publish
+        displayName: 'Publish npm package to Azure Artifacts'
+        dependsOn: Build_And_Test
+        condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'), ne(variables['Build.Reason'], 'PullRequest'))
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+            displayName: 'Use Node $(nodeVersion)'
+
+          - script: |
+              set -e
+              npm install
+              npm run build
+              npm pkg set name="$(frontendPackageName)"
+              npm --no-git-tag-version version "1.0.$(Build.BuildId)"
+            workingDirectory: Application-Code/frontend
+            displayName: 'Build, set package name & unique version'
+
+          - task: Npm@1
+            displayName: 'npm publish -> Azure Artifacts'
+            inputs:
+              command: publish
+              workingDir: Application-Code/frontend
+              publishRegistry: useFeed
+              publishFeed: $(azureArtifactsFeed)
