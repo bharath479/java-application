@@ -23,14 +23,19 @@
 #    tests, then remove the `continueOnError: true` flagged below.
 
 trigger:
+  # run Build_And_Test on every commit pushed to any branch
   branches:
     include:
-      - master
+      - '*'
+  # if several commits land while a run is in progress, batch them into the
+  # next run instead of queuing one run per commit
+  batch: true
 
 pr:
+  # also validate every PR targeting any branch
   branches:
     include:
-      - master
+      - '*'
 
 variables:
   nodeVersion: '14.x' # matches the node:14 base image used in both Dockerfiles
