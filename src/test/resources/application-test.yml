@@ -1,3 +1,4 @@
+# This is a sample Spring Boot application-test.yml configuration file for testing purposes. It configures an in-memory H2 database and sets up JPA and Flyway for database migrations.
 spring:
   datasource:
     url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
